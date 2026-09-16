@@ -487,12 +487,16 @@ describe('shutdown', () => {
     const server = global.server
     await new Promise((resolve) => plugin.init_redis_shared(resolve, server))
     plugin.db = server.notes.redis
+    // once unref'd, the socket alone no longer keeps this process alive
+    // either (node 22's test runner holds nothing else), so hold it here
+    const keepalive = setTimeout(() => {}, 5000)
     try {
       plugin.shutdown()
       assert.equal(server.notes.redis.isOpen, true)
       assert.equal(await server.notes.redis.ping(), 'PONG')
     } finally {
       await server.notes.redis.quit()
+      clearTimeout(keepalive)
     }
   })
 
