@@ -93,15 +93,19 @@ exports.merge_redis_ini = function () {
 exports.init_redis_shared = async function (next, server) {
   // server-wide redis, shared by plugins that don't specify a db ID.
   if (server.notes.redis?.isOpen) {
+    // an open client is still managed by node-redis (connected or
+    // reconnecting) and other plugins hold a reference to it, so a ping
+    // failure is only logged: a replacement client would not fare any better.
     try {
       await server.notes.redis.ping()
       this.loginfo('already connected')
-      return next()
     } catch (e) {
-      this.logerror(`Redis ping failed, reconnecting: ${e.message}`)
+      this.logerror(`Redis error: ${e.message}`)
     }
+    return next()
   }
 
+  // no client yet, or a closed one (node-redis gave up reconnecting)
   try {
     server.notes.redis = await this.get_redis_client(this.redisCfg.server)
   } catch (e) {
@@ -142,12 +146,14 @@ exports.init_redis_plugin = async function (next, server) {
 }
 
 exports.shutdown = function () {
-  // Only quit a plugin-private connection. server.notes.redis must stay open
-  // until all per-connection hooks (hook_disconnect, etc.) have finished —
-  // calling quit() here races with those in-flight operations and causes
-  // "The client is closed" errors. The socket is released when the process exits.
-  if (this.db?.isOpen && this.db !== server?.notes?.redis) {
-    this.db.quit()
+  // Haraka fires plugins.shutdown while connections are still being torn
+  // down, and their hooks (hook_disconnect, ...) keep using these clients.
+  // quit() would race those commands ("The client is closed"), and leaving
+  // the sockets open would keep the event loop alive until Haraka's
+  // force-kill timeout. unref() does neither: the clients stay usable while
+  // connections drain, and the process exits on its own once they are gone.
+  for (const client of [this.db, server?.notes?.redis]) {
+    if (client?.isOpen) client.unref()
   }
 }
 
